@@ -6,4 +6,6 @@ networkx>=3.0
 PyMuPDF>=1.24.0
 requests>=2.31.0
 pyyaml>=6.0
-pydantic-settings>=2.0
+pydantic-settings
+pytesseract
+neo4j>=2.0

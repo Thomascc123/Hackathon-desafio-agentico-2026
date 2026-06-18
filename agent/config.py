@@ -29,7 +29,12 @@ class SecurityConfig(BaseSettings):
 
 
 class GraphConfig(BaseSettings):
-    json_path: str = Field(default="./graphrag_output/knowledge_graph.json", description="Path to graph JSON export")
+    backend: str = Field(default="networkx", description="Graph backend: networkx or neo4j")
+    json_path: str = Field(default="./graphrag_output/knowledge_graph.json", description="Path to graph JSON export for networkx")
+    neo4j_uri: str = Field(default="bolt://localhost:7687", description="Neo4j connection URI")
+    neo4j_user: str = Field(default="neo4j", description="Neo4j username")
+    neo4j_password: str = Field(default="password", description="Neo4j password")
+    neo4j_database: str = Field(default="neo4j", description="Neo4j database name")
 
 
 class DirectoriesConfig(BaseSettings):

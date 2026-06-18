@@ -5,7 +5,17 @@ from the consolidated reglamento estudiantil PDFs using position-based parsing.
 """
 
 import re
+import logging
 import fitz
+
+logger = logging.getLogger(__name__)
+
+_HAS_OCR = False
+try:
+    import pytesseract
+    _HAS_OCR = True
+except ImportError:
+    pass
 
 ROMAN_WORDS = r'PRIMERO|SEGUNDO|TERCERO|CUARTO|QUINTO|SEXTO|SÉPTIMO|OCTAVO|NOVENO|DÉCIMO|UNDÉCIMO|DUODÉCIMO'
 
@@ -25,18 +35,58 @@ PAT_MODIFICACION = re.compile(
 )
 
 
-def extract_text_from_pdf(pdf_path: str) -> tuple[bool, str]:
+def extract_text_from_pdf(pdf_path: str, use_ocr: bool = True) -> tuple[bool, str]:
     try:
         doc = fitz.open(pdf_path)
+        num_pages = len(doc)
         text = ""
         for page in doc:
             text += page.get_text() + "\n"
         doc.close()
+
+        if text.strip():
+            # Text extraction succeeded — check quality
+            chars_per_page = len(text.strip()) / max(num_pages, 1)
+            if chars_per_page > 50:
+                return True, text
+            logger.info("Low text density (%.1f chars/page), attempting OCR", chars_per_page)
+
+        # Fallback to OCR if text is empty or too sparse
+        if use_ocr and _HAS_OCR:
+            logger.info("Running OCR on %s (%d pages)", pdf_path, num_pages)
+            ocr_text = _ocr_pdf(pdf_path)
+            if ocr_text.strip():
+                return True, ocr_text
+            return False, ""
+
         if text.strip():
             return True, text
         return False, ""
+
     except Exception as e:
+        logger.warning("Error extracting text from %s: %s", pdf_path, e)
         return False, str(e)
+
+
+def _ocr_pdf(pdf_path: str) -> str:
+    import pytesseract
+    from PIL import Image
+    import io
+
+    doc = fitz.open(pdf_path)
+    pages_text = []
+    for page_num in range(len(doc)):
+        page = doc[page_num]
+        # Render at 300 DPI for good OCR quality
+        zoom = 300 / 72
+        matrix = fitz.Matrix(zoom, zoom)
+        pix = page.get_pixmap(matrix=matrix)
+        img_data = pix.tobytes("png")
+        img = Image.open(io.BytesIO(img_data))
+        text = pytesseract.image_to_string(img, lang="spa")
+        pages_text.append(text)
+    doc.close()
+    return "\n".join(pages_text)
 
 
 def _find_elements(body: str) -> list[dict]:

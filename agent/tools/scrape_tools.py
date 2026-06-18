@@ -126,7 +126,11 @@ def register_scrape_tools(agent):
             parsed = parse_consolidated_reglamento(text)
             if parsed and parsed.get("titulos"):
                 graph = ctx.deps.graph
-                graph.build_from_parsed_reglamento(parsed, codigo)
+                from graphrag.graph_builder import NetworkXNormativaGraph
+                if isinstance(graph, NetworkXNormativaGraph):
+                    graph.build_from_parsed_reglamento(parsed, codigo)
+                else:
+                    logger.warning("Skipping build_from_parsed_reglamento: not a NetworkX backend")
                 total_arts = sum(
                     sum(len(c.get("articulos", [])) for c in t.get("capitulos", [])) +
                     len(t.get("articulos_directos", []))
@@ -156,7 +160,14 @@ def register_scrape_tools(agent):
 
 
 def _enrich_and_add_to_graph(graph, docs: list[dict], keyword: str):
-    """Add scraped documents to the in-memory knowledge graph."""
+    """Add scraped documents to the in-memory knowledge graph.
+    Only works with NetworkXNormativaGraph (builder methods not available on Neo4j)."""
+    from graphrag.graph_builder import NetworkXNormativaGraph
+
+    if not isinstance(graph, NetworkXNormativaGraph):
+        logger.warning("Skipping graph enrichment: not a NetworkX backend")
+        return
+
     from graphrag.graph_models import NodeType, EdgeType
     from graphrag.parser import extract_metadata_from_resuelve
 

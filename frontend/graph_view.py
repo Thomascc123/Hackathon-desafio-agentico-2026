@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 import streamlit as st
 
 if TYPE_CHECKING:
-    from graphrag.graph_builder import NormativaGraph
+    from graphrag.base_graph import BaseNormativaGraph
 
 # ── Node/edge style config ──────────────────────────────────────────
 
@@ -68,18 +68,19 @@ def _edge_title(data: dict) -> str:
 
 
 def render_graph_html(
-    graph: NormativaGraph,
+    graph: BaseNormativaGraph,
     selected_types: list[str] | None = None,
     search: str = "",
     max_nodes: int = 500,
     physics: bool = True,
+    highlight_ids: list[str] | None = None,
 ) -> str:
     """
     Build a Pyvis HTML visualization of the knowledge graph.
     
     Parameters
     ----------
-    graph : NormativaGraph
+    graph : BaseNormativaGraph
         The knowledge graph to visualize.
     selected_types : list[str] or None
         If provided, only include nodes of these types (e.g. ["Articulo", "Documento"]).
@@ -173,15 +174,21 @@ def render_graph_html(
             edge_list.append((u, v, k, dict(data)))
 
     # ── Add nodes to Pyvis ───────────────────────────────────────────
+    highlight_set = set(highlight_ids or [])
     for nid in node_ids:
         data = node_map[nid]
         ntype = data.get("type", "")
         ntype_str = ntype.value if hasattr(ntype, "value") else str(ntype)
         label = data.get("label", nid)
         title = _node_title(data)
+        is_highlighted = nid in highlight_set
         color = NODE_COLORS.get(ntype_str, "#97c2fc")
         size = 20 if ntype_str == "Documento" else (15 if ntype_str == "Articulo" else 12)
         shape = "box" if ntype_str == "Documento" else "dot"
+        if is_highlighted:
+            size = int(size * 1.5)
+            color = "#ff6600"
+            shape = "star"
         net.add_node(
             nid,
             label=label[:40],
@@ -189,7 +196,7 @@ def render_graph_html(
             color=color,
             size=size,
             shape=shape,
-            borderWidth=2,
+            borderWidth=4 if is_highlighted else 2,
         )
 
     # ── Add edges to Pyvis ───────────────────────────────────────────
@@ -267,8 +274,16 @@ def render_graph_html(
     return html
 
 
-def render_graph_page(graph: NormativaGraph) -> None:
-    """Render the graph explorer page in Streamlit."""
+def render_graph_page(graph: BaseNormativaGraph, ref_to_node_id: dict | None = None) -> None:
+    """Render the graph explorer page in Streamlit.
+
+    Parameters
+    ----------
+    graph : NormativaGraph
+        The knowledge graph to visualize.
+    ref_to_node_id : dict or None
+        Mapping from source reference strings to graph node IDs for highlighting.
+    """
 
     from graphrag.graph_models import NodeType
 
@@ -297,9 +312,18 @@ def render_graph_page(graph: NormativaGraph) -> None:
         )
 
     with col3:
-        max_n = st.selectbox("Máx. nodos", [200, 500, 1000, 2000], index=1)
+        max_n = st.selectbox("Máx. nodos", [200, 500, 1000, 2000, 5000, 10000], index=1)
 
     physics = st.toggle("Física (layout automático)", value=True, key="graph_physics")
+
+    # ── Resolve highlighted refs ─────────────────────────────────────
+    highlight_ids: list[str] = []
+    if ref_to_node_id:
+        highlighted_refs = st.session_state.get("highlighted_refs", [])
+        for ref in highlighted_refs:
+            nid = ref_to_node_id.get(ref)
+            if nid:
+                highlight_ids.append(nid)
 
     # ── Render ───────────────────────────────────────────────────────
     with st.spinner("Generando visualización del grafo..."):
@@ -309,6 +333,7 @@ def render_graph_page(graph: NormativaGraph) -> None:
             search=search,
             max_nodes=max_n,
             physics=physics,
+            highlight_ids=highlight_ids,
         )
 
     st.components.v1.html(html, height=750, scrolling=False)

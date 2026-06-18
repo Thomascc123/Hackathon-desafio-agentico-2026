@@ -5,15 +5,20 @@ Uses NetworkX for in-memory graph + exports for Neo4j import.
 
 import json
 import re
+from collections.abc import Iterator
 import networkx as nx
 from collections import defaultdict
 from datetime import datetime
 
 from .graph_models import Node, Edge, NodeType, EdgeType
+from .base_graph import BaseNormativaGraph
 
 
-class NormativaGraph:
-    """Knowledge graph for UdeA normative documents."""
+class NetworkXNormativaGraph(BaseNormativaGraph):
+    """Knowledge graph for UdeA normative documents backed by NetworkX.
+
+    This is the default local backend. For production, use Neo4jNormativaGraph.
+    """
 
     def __init__(self):
         self.graph = nx.MultiDiGraph()
@@ -324,6 +329,19 @@ class NormativaGraph:
         results.sort(key=lambda x: x.get("anio", ""))
         return results
 
+    # --- BaseGraph interface overrides ---
+
+    def export_to_json(self) -> dict:
+        return self.to_json()
+
+    def iter_nodes(self) -> Iterator[tuple[str, dict]]:
+        for nid, data in self.graph.nodes(data=True):
+            yield nid, dict(data)
+
+    def iter_edges(self) -> Iterator[tuple[str, str, str | None, dict]]:
+        for u, v, k, data in self.graph.edges(data=True, keys=True):
+            yield u, v, k, dict(data)
+
     # --- Export ---
 
     def to_cypher(self) -> str:
@@ -413,3 +431,7 @@ class NormativaGraph:
                 lines.append(f"\n  Texto actual: {item['texto_actual']}...")
                 lines.append(f"  Total modificaciones: {item['num_modificaciones']}")
         return "\n".join(lines)
+
+
+# Backward-compatible alias
+NormativaGraph = NetworkXNormativaGraph

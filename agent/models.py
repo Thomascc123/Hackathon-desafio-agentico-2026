@@ -39,6 +39,57 @@ class DocumentSummary(BaseModel):
     anio: str = Field(default="", description="Year")
 
 
+class ArticleTextResult(BaseModel):
+    numero: str = ""
+    texto: str = ""
+    texto_completo: str = ""
+    modificaciones: int = 0
+    documento: str = ""
+    documento_asunto: str = ""
+
+
+class KeywordSearchResult(BaseModel):
+    articulo: str = ""
+    texto: str = ""
+    texto_completo: str = ""
+    documento_codigo: str = ""
+    documento: str = ""
+    documento_label: str = ""
+    documento_asunto: str = ""
+    modificaciones: int = 0
+
+
+class EvolutionItem(BaseModel):
+    modificado_por: str = ""
+    fecha: str = ""
+    anio: str = ""
+    accion: str = ""
+    articulo: str = ""
+    texto_actual: str = ""
+    num_modificaciones: int = 0
+
+
+class DocumentTimelineResult(BaseModel):
+    id: str = ""
+    numero: str = ""
+    fecha: str = ""
+    anio: str = ""
+    resuelve: str = ""
+    autoridad: str = ""
+
+
+class DocumentSearchResult(BaseModel):
+    id: str = ""
+    numero: str = ""
+    fecha: str = ""
+    resuelve: str = ""
+    autoridad: str = ""
+
+
+class HelpResult(BaseModel):
+    help_text: str = ""
+
+
 class AgentResponse(BaseModel):
     answer: str = Field(description="Complete answer in Spanish with citations")
     sources: list[str] = Field(description="List of cited sources")

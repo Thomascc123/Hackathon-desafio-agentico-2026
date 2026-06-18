@@ -1,6 +1,7 @@
 import json
 from pydantic_ai import RunContext
 from agent.models import AgentDeps, ArticleHistory, ModificationEvent, DocumentSummary
+from graphrag.base_graph import BaseNormativaGraph
 
 
 def register_graph_tools(agent):

@@ -16,12 +16,20 @@ import os
 from typing import Callable
 
 from .graph_models import NodeType, EdgeType
+from .base_graph import BaseNormativaGraph
+from agent.models import (
+    ArticleTextResult,
+    KeywordSearchResult,
+    EvolutionItem,
+    DocumentTimelineResult,
+    DocumentSearchResult,
+    HelpResult,
+)
 
 
 # ── Intent patterns ──────────────────────────────────────────────
 
 INTENT_PATTERNS: list[tuple[str, str, list[str]]] = [
-    # (intent_name, regex_pattern, required_groups)
     ("article_text", r'(?:qu[ée]\s+)?(?:dice|muestra|texto|contenido|leer)\s+(?:el\s+)?art[ií]culo\s+(\d+)', ["art_num"]),
     ("article_text", r'art[ií]culo\s+(\d+)\s*(?:del\s+reglamento)?\s*(?:\w+\s+)?(?:dice|establece|se[ñn]ala|indica|define|trata)', ["art_num"]),
     ("article_text", r'^(?:el\s+)?art[ií]culo\s+(\d+)\s*$', ["art_num"]),
@@ -64,7 +72,6 @@ def _truncate(text: str, max_len: int = 200) -> str:
 
 
 def _find_sentence(text: str, keyword: str) -> str:
-    """Find the sentence containing the keyword (case-insensitive)."""
     import unicodedata
     def _normalize(t: str) -> str:
         return ''.join(c for c in unicodedata.normalize('NFKD', t.lower())
@@ -81,54 +88,31 @@ def _find_sentence(text: str, keyword: str) -> str:
     return text[:150]
 
 
-def _fmt_source_block(title: str, items: list[str]) -> str:
-    if not items:
-        return ""
-    return f"\n**{title}**\n" + "\n".join(f"  • {item}" for item in items)
-
-
-def _fmt_article_header(art: dict, keyword: str = "") -> str:
-    num = art.get("articulo") or art.get("numero", "?")
-    doc = art.get("documento_label") or art.get("documento", "")
-    asunto = art.get("documento_asunto", "")
-    doc_str = f" — {doc}" if doc else ""
-    return f"**Art. {num}**{doc_str}"
-
-
-def _fmt_article_body(art: dict, keyword: str = "") -> str:
-    texto = art.get("texto_completo") or art.get("texto", "")
-    if keyword:
-        excerpt = _find_sentence(texto, keyword)
-    else:
-        excerpt = _truncate(texto, 150)
-    return f"“{excerpt}”"
-
-
 # ── Agent class ──────────────────────────────────────────────────
 
 class GraphRAGAgent:
     """GraphRAG agent that answers questions about UdeA normative documents."""
 
-    def __init__(self, graph):
+    def __init__(self, graph: BaseNormativaGraph):
         self.graph = graph
         self._load_concept_index()
 
     def _load_concept_index(self):
-        """Build a concept → articles index for fast lookup."""
-        self.concept_index = {}
+        self.concept_index: dict[str, list[KeywordSearchResult]] = {}
         for nid, data in self.graph.graph.nodes(data=True):
             if data.get("type") == NodeType.ARTICULO:
                 texto = (data.get("texto", "") + " " +
                          data.get("texto_completo", "")).lower()
-                # Index key concepts
                 concepts = self._extract_concepts(texto)
                 for c in concepts:
-                    self.concept_index.setdefault(c, []).append({
-                        "numero": data.get("numero"),
-                        "texto": data.get("texto", "")[:200],
-                        "documento": data.get("documento_codigo", ""),
-                        "modificaciones": data.get("num_modificaciones", 0),
-                    })
+                    self.concept_index.setdefault(c, []).append(
+                        KeywordSearchResult(
+                            articulo=data.get("numero", ""),
+                            texto=data.get("texto", "")[:200],
+                            documento=data.get("documento_codigo", ""),
+                            modificaciones=data.get("num_modificaciones", 0),
+                        )
+                    )
 
     def _extract_concepts(self, text: str) -> set:
         keywords = [
@@ -146,16 +130,12 @@ class GraphRAGAgent:
         return found
 
     def classify_intent(self, question: str) -> tuple[str, dict]:
-        """Classify user question into an intent and extract parameters."""
         question_clean = question.strip().lower()
-
         for intent, pattern, groups in INTENT_PATTERNS:
             m = re.search(pattern, question_clean, re.IGNORECASE | re.UNICODE)
             if m:
                 params = {}
-                # Map groups: use last group by default for the first param
                 for i, g in enumerate(groups):
-                    # Use group from the end if index exceeds available groups
                     group_idx = i + 1 + (len(m.groups()) - len(groups))
                     if group_idx < 1:
                         group_idx = len(m.groups())
@@ -165,11 +145,9 @@ class GraphRAGAgent:
                     else:
                         params[g] = ""
                 return intent, params
-
         return "unknown", {}
 
     def answer(self, question: str) -> str:
-        """Process a natural language question and return an answer."""
         intent, params = self.classify_intent(question)
         handler = self._get_handler(intent)
         if handler is None:
@@ -192,12 +170,13 @@ class GraphRAGAgent:
         }
         return handlers.get(intent)
 
-    def _handle_article_text(self, params: dict) -> list:
+    # ── Handlers ─────────────────────────────────────────────────
+
+    def _handle_article_text(self, params: dict) -> list[ArticleTextResult]:
         art_num = params.get("art_num", "")
-        results = []
+        results: list[ArticleTextResult] = []
         for nid, data in self.graph.graph.nodes(data=True):
             if data.get("type") == NodeType.ARTICULO and data.get("numero") == art_num:
-                # Traverse up CONTIENE edges to find the root document
                 doc_label = ""
                 doc_asunto = ""
                 seen = set()
@@ -218,33 +197,33 @@ class GraphRAGAgent:
                                 break
                             elif pt in (NodeType.CAPITULO, NodeType.TITULO):
                                 stack.append(src)
-                results.append({
-                    "numero": data.get("numero"),
-                    "texto": data.get("texto", ""),
-                    "texto_completo": data.get("texto_completo", ""),
-                    "modificaciones": data.get("num_modificaciones", 0),
-                    "documento": doc_asunto or doc_label or "Reglamento Estudiantil de Pregrado",
-                    "documento_asunto": doc_asunto,
-                })
+                results.append(ArticleTextResult(
+                    numero=data.get("numero", ""),
+                    texto=data.get("texto", ""),
+                    texto_completo=data.get("texto_completo", ""),
+                    modificaciones=data.get("num_modificaciones", 0),
+                    documento=doc_asunto or doc_label or "Reglamento Estudiantil de Pregrado",
+                    documento_asunto=doc_asunto,
+                ))
         return results
 
-    def _handle_evolution(self, params: dict) -> list:
-        art_num = params.get("art_num", "")
-        return self.graph.query_evolution_of_article(art_num)
-
-    def _handle_modified_by(self, params: dict) -> list:
+    def _handle_evolution(self, params: dict) -> list[EvolutionItem]:
         art_num = params.get("art_num", "")
         raw = self.graph.query_evolution_of_article(art_num)
-        # Filter to only modification events
-        return [r for r in raw if "modificado_por" in r]
+        return [EvolutionItem(**r) for r in raw]
 
-    def _handle_keyword_search(self, params: dict) -> list:
+    def _handle_modified_by(self, params: dict) -> list[EvolutionItem]:
+        art_num = params.get("art_num", "")
+        raw = self.graph.query_evolution_of_article(art_num)
+        return [EvolutionItem(**r) for r in raw if "modificado_por" in r]
+
+    def _handle_keyword_search(self, params: dict) -> list[KeywordSearchResult]:
         keyword = params.get("keyword", "")
-        return self.graph.query_articles_by_keyword(keyword)
+        raw = self.graph.query_articles_by_keyword(keyword)
+        return [KeywordSearchResult(**r) for r in raw]
 
-    def _handle_document_timeline(self, params: dict) -> list:
+    def _handle_document_timeline(self, params: dict) -> list[DocumentTimelineResult]:
         asunto = params.get("asunto", "").upper()
-        # Map to known asuntos
         asunto_map = {
             "pregrado": "REGLAMENTO ESTUDIANTIL DE PREGRADO",
             "posgrado": "REGLAMENTO ESTUDIANTIL DE POSGRADO",
@@ -253,45 +232,45 @@ class GraphRAGAgent:
         }
         mapped = asunto_map.get(asunto.lower(), asunto)
         if mapped == asunto and asunto:
-            # Try partial match
             for nid, data in self.graph.graph.nodes(data=True):
                 if data.get("type") == NodeType.DOCUMENTO:
                     a = data.get("asunto", "")
                     if asunto in a.upper():
                         mapped = a
                         break
-        return self.graph.query_document_timeline(asunto=mapped if mapped != asunto else "")
+        raw = self.graph.query_document_timeline(asunto=mapped if mapped != asunto else "")
+        return [DocumentTimelineResult(**r) for r in raw]
 
-    def _handle_concept_query(self, params: dict) -> list:
+    def _handle_concept_query(self, params: dict) -> list[KeywordSearchResult]:
         concept = params.get("concept", "").lower()
         arts = self.concept_index.get(concept, [])
-        # Also try keyword search
         if not arts:
-            arts = self.graph.query_articles_by_keyword(concept)
+            raw = self.graph.query_articles_by_keyword(concept)
+            arts = [KeywordSearchResult(**r) for r in raw]
         return arts
 
-    def _handle_article_by_concept(self, params: dict) -> list:
+    def _handle_article_by_concept(self, params: dict) -> list[KeywordSearchResult]:
         return self._handle_concept_query(params)
 
-    def _handle_document_search(self, params: dict) -> list:
+    def _handle_document_search(self, params: dict) -> list[DocumentSearchResult]:
         doc_num = params.get("doc_num", "")
         doc_year = params.get("doc_year", "")
-        results = []
+        results: list[DocumentSearchResult] = []
         for nid, data in self.graph.graph.nodes(data=True):
             if data.get("type") == NodeType.DOCUMENTO:
                 if data.get("numero", "").lstrip("0") == doc_num.lstrip("0"):
                     if not doc_year or data.get("anio", "") == doc_year:
-                        results.append({
-                            "id": nid,
-                            "numero": data.get("numero", ""),
-                            "fecha": data.get("fecha", ""),
-                            "resuelve": data.get("resuelve", ""),
-                            "autoridad": data.get("autoridad", ""),
-                        })
+                        results.append(DocumentSearchResult(
+                            id=nid,
+                            numero=data.get("numero", ""),
+                            fecha=data.get("fecha", ""),
+                            resuelve=data.get("resuelve", ""),
+                            autoridad=data.get("autoridad", ""),
+                        ))
         return results
 
-    def _handle_help(self, params: dict) -> list:
-        return [{"help_text": """
+    def _handle_help(self, params: dict) -> list[HelpResult]:
+        return [HelpResult(help_text="""
 **Comandos disponibles:**
 
 🔍 `¿Qué dice el artículo X?` — Muestra el texto de un artículo
@@ -301,7 +280,7 @@ class GraphRAGAgent:
 📋 `Documentos de pregrado` — Línea de tiempo de documentos
 📖 `Acuerdo Superior XX de YYYY` — Busca un acuerdo específico
 ❓ `¿Qué son las matrículas de honor?` — Define un concepto
-        """}]
+        """)]
 
     def _unknown_intent_response(self, question: str) -> str:
         return (
@@ -313,6 +292,8 @@ class GraphRAGAgent:
             f"  • \"Documentos de pregrado\"\n"
             f"  • Escribe 'ayuda' para más opciones."
         )
+
+    # ── Response formatting ──────────────────────────────────────
 
     def _format_response(self, intent: str, params: dict, result: list) -> str:
         if not result:
@@ -338,7 +319,7 @@ class GraphRAGAgent:
             return self._fmt_document_search(params, result)
 
         elif intent == "help":
-            return result[0].get("help_text", "")
+            return result[0].help_text
 
         else:
             lines = [f"**Resultados** ({len(result)} encontrados):"]
@@ -346,96 +327,93 @@ class GraphRAGAgent:
                 lines.append(str(r))
             return "\n".join(lines)
 
-    def _fmt_article_text(self, params: dict, result: list) -> str:
-        lines = [f"**Respuesta rápida:**"]
+    def _fmt_article_text(self, params: dict, result: list[ArticleTextResult]) -> str:
+        lines = ["**Respuesta rápida:**"]
         for r in result:
-            texto = r.get("texto", "") or r.get("texto_completo", "")
+            lines.append(f"**Artículo {r.numero}**")
+            texto = r.texto or r.texto_completo
             lines.append(texto[:300])
-            doc = r.get("documento", "")
-            if doc:
-                lines.append(f"\n_Fuente: {doc}_")
-            if r.get("modificaciones", 0) > 0:
-                lines.append(f"_Modificado en {r['modificaciones']} ocasiones_")
+            if r.documento:
+                lines.append(f"\n_Fuente: {r.documento}_")
+            if r.modificaciones > 0:
+                lines.append(f"_Modificado en {r.modificaciones} ocasiones_")
         return "\n".join(lines)
 
-    def _fmt_evolution(self, params: dict, result: list) -> str:
+    def _fmt_evolution(self, params: dict, result: list[EvolutionItem]) -> str:
         art = params.get("art_num", "")
         lines = [f"**Evolución del Artículo {art}**\n"]
-        mods = [r for r in result if "modificado_por" in r]
-        current = [r for r in result if "texto_actual" in r]
+        mods = [r for r in result if r.modificado_por]
+        current = [r for r in result if r.texto_actual]
 
         if mods:
             lines.append(f"**Modificaciones ({len(mods)}):**")
             for m in mods:
-                lines.append(f"  • {m.get('anio', '?')}: **{m.get('modificado_por', '?')}**"
-                             f"\n    → {_truncate(m.get('accion', ''), 120)}")
+                lines.append(f"  • {m.anio or '?'}: **{m.modificado_por}**"
+                             f"\n    → {_truncate(m.accion, 120)}")
 
         if current:
             lines.append(f"\n**Texto vigente:**")
-            lines.append(f"{_truncate(current[0].get('texto_actual', ''), 300)}")
+            lines.append(f"{_truncate(current[0].texto_actual, 300)}")
 
         return "\n".join(lines)
 
-    def _fmt_modified_by(self, params: dict, result: list) -> str:
+    def _fmt_modified_by(self, params: dict, result: list[EvolutionItem]) -> str:
         art = params.get("art_num", "")
         lines = [f"**Documentos que modifican el Artículo {art}**\n"]
         for r in result:
-            if "modificado_por" in r:
-                lines.append(f"  • {r.get('anio', '?')}: **{r.get('modificado_por', '?')}**")
-                if r.get("accion"):
-                    lines[-1] += f"\n    → {_truncate(r['accion'], 100)}"
+            if r.modificado_por:
+                lines.append(f"  • {r.anio or '?'}: **{r.modificado_por}**")
+                if r.accion:
+                    lines[-1] += f"\n    → {_truncate(r.accion, 100)}"
         return "\n".join(lines)
 
-    def _fmt_keyword_search(self, keyword: str, result: list) -> str:
-        lines = [f"**Respuesta rápida:**"]
+    def _fmt_keyword_search(self, keyword: str, result: list[KeywordSearchResult]) -> str:
+        lines = ["**Respuesta rápida:**"]
         lines.append(f"Se encontraron {len(result)} artículos relacionados con \"{keyword}\".")
         lines.append("")
 
-        lines.append(f"**Fuentes consultadas:**\n")
+        lines.append("**Fuentes consultadas:**\n")
         for r in result[:5]:
-            header = _fmt_article_header(r, keyword)
-            body = _fmt_article_body(r, keyword)
-            doc = r.get("documento_label") or r.get("documento", "")
-            asunto = r.get("documento_asunto", "")
-            doc_info = f" — {asunto}" if asunto else ""
-            lines.append(f"📄 **Art. {r.get('articulo')}**{doc_info}")
-            lines.append(f"   {body}")
+            doc_info = f" — {r.documento_asunto}" if r.documento_asunto else ""
+            lines.append(f"📄 **Art. {r.articulo}**{doc_info}")
+            body = r.texto_completo or r.texto
+            excerpt = _find_sentence(body, keyword)
+            lines.append(f"   \"{excerpt}\"")
             lines.append("")
 
         if len(result) > 5:
-            remaining = [r.get("articulo") for r in result[5:10]]
+            remaining = [r.articulo for r in result[5:10]]
             lines.append(f"... y {len(result) - 5} artículos más (Art. {', '.join(remaining)}{', ...' if len(result) > 10 else ''})")
 
         lines.append("")
         lines.append(f"**Donde se menciona \"{keyword}\":**")
         for r in result[:8]:
-            texto = r.get("texto_completo") or r.get("texto", "")
+            texto = r.texto_completo or r.texto
             excerpt = _find_sentence(texto, keyword)
-            lines.append(f"  • **Art. {r.get('articulo')}**: “{excerpt}”")
+            lines.append(f"  • **Art. {r.articulo}**: “{excerpt}”")
 
         return "\n".join(lines)
 
-    def _fmt_document_timeline(self, params: dict, result: list) -> str:
+    def _fmt_document_timeline(self, params: dict, result: list[DocumentTimelineResult]) -> str:
         lines = [f"**Documentos encontrados** ({len(result)})\n"]
         for r in result[:10]:
-            lines.append(f"  • {r.get('fecha', '?')} | **#{r.get('numero')}** | {_truncate(r.get('resuelve', ''), 80)}")
+            lines.append(f"  • {r.fecha or '?'} | **#{r.numero}** | {_truncate(r.resuelve, 80)}")
         if len(result) > 10:
             lines.append(f"\n... y {len(result) - 10} más.")
         return "\n".join(lines)
 
-    def _fmt_document_search(self, params: dict, result: list) -> str:
+    def _fmt_document_search(self, params: dict, result: list[DocumentSearchResult]) -> str:
         lines = [f"**Acuerdo Superior {params.get('doc_num', '')}**\n"]
         for r in result:
-            lines.append(f"  • Fecha: {r.get('fecha', '?')}")
-            lines.append(f"  • Autoridad: {r.get('autoridad', '?')}")
-            lines.append(f"  • Resuelve: {r.get('resuelve', '?')}")
+            lines.append(f"  • Fecha: {r.fecha or '?'}")
+            lines.append(f"  • Autoridad: {r.autoridad or '?'}")
+            lines.append(f"  • Resuelve: {r.resuelve or '?'}")
         return "\n".join(lines)
 
 
 # ── Interactive CLI ──────────────────────────────────────────────
 
 def interactive_cli(graph):
-    """Run an interactive Q&A session."""
     agent = GraphRAGAgent(graph)
 
     print("\n" + "=" * 60)
@@ -451,7 +429,6 @@ def interactive_cli(graph):
                 break
             if not q:
                 continue
-
             print("\n" + agent.answer(q))
         except KeyboardInterrupt:
             break
@@ -466,7 +443,6 @@ if __name__ == "__main__":
     from graphrag.pipeline import run_pipeline
     import json
 
-    # Build or load graph
     graph_path = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         "graphrag_output",
@@ -490,7 +466,6 @@ if __name__ == "__main__":
         g = run_pipeline(limit=10)
 
     if len(sys.argv) > 1:
-        # One-shot query
         q = " ".join(sys.argv[1:])
         agent = GraphRAGAgent(g)
         print(agent.answer(q))

@@ -1,6 +1,6 @@
 model:
   provider: ollama
-  name: qwen:latest
+  name: llama3.1:latest
   base_url: http://localhost:11434/v1
   api_key: null
 
@@ -18,7 +18,12 @@ security:
   audit_db: ./storage/audit.db
 
 graph:
+  backend: networkx           # "networkx" for local, "neo4j" for production
   json_path: ./graphrag_output/knowledge_graph.json
+  neo4j_uri: bolt://localhost:7687
+  neo4j_user: neo4j
+  neo4j_password: password
+  neo4j_database: neo4j
 
 directories:
   pdf_dir: /tmp/normativa_pdfs
