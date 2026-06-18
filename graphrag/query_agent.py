@@ -22,8 +22,9 @@ from .graph_models import NodeType, EdgeType
 
 INTENT_PATTERNS: list[tuple[str, str, list[str]]] = [
     # (intent_name, regex_pattern, required_groups)
-    ("article_text", r'(?:qué dice|muestra|texto|contenido|leer)\s+(?:el\s+)?art[ií]culo\s+(\d+)', ["art_num"]),
-    ("article_text", r'art[ií]culo\s+(\d+)\s*(?:del\s+reglamento)?\s*(?:dice|establece|se[ñn]ala|indica|define)', ["art_num"]),
+    ("article_text", r'(?:qu[ée]\s+)?(?:dice|muestra|texto|contenido|leer)\s+(?:el\s+)?art[ií]culo\s+(\d+)', ["art_num"]),
+    ("article_text", r'art[ií]culo\s+(\d+)\s*(?:del\s+reglamento)?\s*(?:\w+\s+)?(?:dice|establece|se[ñn]ala|indica|define|trata)', ["art_num"]),
+    ("article_text", r'^(?:el\s+)?art[ií]culo\s+(\d+)\s*$', ["art_num"]),
 
     ("evolution", r'(?:historia|evoluci[óo]n|modificaciones|c[óo]mo ha cambiado|l[íi]nea de tiempo)\s+(?:del\s+)?(?:el\s+)?art[ií]culo\s+(\d+)', ["art_num"]),
     ("evolution", r'qu[ée]\s+(?:modificaciones|cambios)\s+(?:tiene|ha tenido|se le han hecho)\s+(?:el\s+)?art[ií]culo\s+(\d+)', ["art_num"]),
@@ -55,27 +56,52 @@ INTENT_PATTERNS: list[tuple[str, str, list[str]]] = [
 
 # ── Response templates ───────────────────────────────────────────
 
-def _fmt_article(art: dict) -> str:
-    texto = art.get("texto", "")
-    mods = art.get("modificaciones", [])
-    mod_str = ""
-    if mods:
-        mod_str = f"\n  📝 {len(mods)} modificación(es): " + "; ".join(
-            f"{m.get('tipo_norma','')} {m.get('numero','')}/{m.get('anio','')}"
-            for m in mods[:5]
-        )
-    return f"**Artículo {art.get('numero')}**\n{_truncate(texto, 300)}.{mod_str}"
-
-
-def _fmt_modification(item: dict) -> str:
-    return (f"  • {item.get('anio', '?')}: Modificado por **{item.get('modificado_por', '?')}**\n"
-            f"    Acción: {_truncate(item.get('accion', item.get('texto_actual', '')), 100)}")
-
 
 def _truncate(text: str, max_len: int = 200) -> str:
     if len(text) <= max_len:
         return text
     return text[:max_len].rsplit(" ", 1)[0] + "..."
+
+
+def _find_sentence(text: str, keyword: str) -> str:
+    """Find the sentence containing the keyword (case-insensitive)."""
+    import unicodedata
+    def _normalize(t: str) -> str:
+        return ''.join(c for c in unicodedata.normalize('NFKD', t.lower())
+                       if not unicodedata.combining(c))
+    raw_key = _normalize(keyword)
+    words = [w for w in raw_key.split() if len(w) >= 3]
+    if not words:
+        words = [raw_key]
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    for s in sentences:
+        snorm = _normalize(s)
+        if any(w in snorm for w in words):
+            return s.strip()[:200]
+    return text[:150]
+
+
+def _fmt_source_block(title: str, items: list[str]) -> str:
+    if not items:
+        return ""
+    return f"\n**{title}**\n" + "\n".join(f"  • {item}" for item in items)
+
+
+def _fmt_article_header(art: dict, keyword: str = "") -> str:
+    num = art.get("articulo") or art.get("numero", "?")
+    doc = art.get("documento_label") or art.get("documento", "")
+    asunto = art.get("documento_asunto", "")
+    doc_str = f" — {doc}" if doc else ""
+    return f"**Art. {num}**{doc_str}"
+
+
+def _fmt_article_body(art: dict, keyword: str = "") -> str:
+    texto = art.get("texto_completo") or art.get("texto", "")
+    if keyword:
+        excerpt = _find_sentence(texto, keyword)
+    else:
+        excerpt = _truncate(texto, 150)
+    return f"“{excerpt}”"
 
 
 # ── Agent class ──────────────────────────────────────────────────
@@ -147,7 +173,8 @@ class GraphRAGAgent:
         intent, params = self.classify_intent(question)
         handler = self._get_handler(intent)
         if handler is None:
-            return self._unknown_intent_response(question)
+            result = self._handle_keyword_search({"keyword": question})
+            return self._format_response("keyword_search", {"keyword": question}, result)
         result = handler(params)
         return self._format_response(intent, params, result)
 
@@ -167,22 +194,37 @@ class GraphRAGAgent:
 
     def _handle_article_text(self, params: dict) -> list:
         art_num = params.get("art_num", "")
-        pattern = f"%_{art_num}"
         results = []
         for nid, data in self.graph.graph.nodes(data=True):
             if data.get("type") == NodeType.ARTICULO and data.get("numero") == art_num:
-                # Find which document it belongs to
+                # Traverse up CONTIENE edges to find the root document
                 doc_label = ""
-                for src, _, edata in self.graph.graph.in_edges(nid, data=True):
-                    if edata.get("type") == EdgeType.CONTIENE:
-                        parent = self.graph.graph.nodes[src]
-                        doc_label = parent.get("label", "")
+                doc_asunto = ""
+                seen = set()
+                stack = [nid]
+                while stack:
+                    current = stack.pop()
+                    if current in seen:
+                        continue
+                    seen.add(current)
+                    for src, _, edata in self.graph.graph.in_edges(current, data=True):
+                        if edata.get("type") == EdgeType.CONTIENE:
+                            parent_data = self.graph.graph.nodes[src]
+                            pt = parent_data.get("type")
+                            if pt == NodeType.DOCUMENTO:
+                                doc_label = parent_data.get("label", "")
+                                doc_asunto = parent_data.get("asunto", "")
+                                stack.clear()
+                                break
+                            elif pt in (NodeType.CAPITULO, NodeType.TITULO):
+                                stack.append(src)
                 results.append({
                     "numero": data.get("numero"),
                     "texto": data.get("texto", ""),
                     "texto_completo": data.get("texto_completo", ""),
                     "modificaciones": data.get("num_modificaciones", 0),
-                    "documento": doc_label,
+                    "documento": doc_asunto or doc_label or "Reglamento Estudiantil de Pregrado",
+                    "documento_asunto": doc_asunto,
                 })
         return results
 
@@ -277,74 +319,117 @@ class GraphRAGAgent:
             return "No encontré información relacionada con tu consulta."
 
         if intent == "article_text":
-            lines = [f"📖 **Artículo {params.get('art_num')}**"]
-            for r in result:
-                lines.append("")
-                lines.append(r.get("texto", ""))
-                if r.get("modificaciones", 0) > 0:
-                    lines.append(f"\n_Modificado en {r['modificaciones']} ocasiones_")
-            return "\n".join(lines)
+            return self._fmt_article_text(params, result)
 
         elif intent == "evolution":
-            lines = [f"📜 **Evolución del Artículo {params.get('art_num')}**\n"]
-            for item in result:
-                if "modificado_por" in item:
-                    lines.append(_fmt_modification(item))
-                elif "texto_actual" in item:
-                    lines.append(f"\n**Texto actual:** {_truncate(item.get('texto_actual', ''), 200)}")
-            return "\n".join(lines)
+            return self._fmt_evolution(params, result)
 
         elif intent == "modified_by":
-            lines = [f"📝 **Documentos que modifican el Artículo {params.get('art_num')}**\n"]
-            for r in result:
-                if "modificado_por" in r:
-                    lines.append(f"  • {r.get('anio', '?')}: **{r.get('modificado_por', '?')}**")
-                    if r.get("accion"):
-                        lines[-1] += f"\n    → {_truncate(r['accion'], 100)}"
-                elif "articulo" in r:
-                    lines.append(f"  • {r.get('articulo')} — {_truncate(r.get('texto', ''), 100)}")
-            return "\n".join(lines)
+            return self._fmt_modified_by(params, result)
 
-        elif intent == "keyword_search":
-            kw = params.get("keyword", "")
-            lines = [f"🔎 **Artículos que mencionan '{kw}'** ({len(result)} encontrados)\n"]
-            for r in result[:10]:
-                lines.append(f"  • **Art. {r.get('articulo')}**: {_truncate(r.get('texto'), 120)}")
-            if len(result) > 10:
-                lines.append(f"\n... y {len(result) - 10} más.")
-            return "\n".join(lines)
+        elif intent in ("keyword_search", "concept_query", "article_by_concept"):
+            kw = params.get("keyword") or params.get("concept", "")
+            return self._fmt_keyword_search(kw, result)
 
         elif intent == "document_timeline":
-            lines = [f"📋 **Documentos** ({len(result)} encontrados)\n"]
-            for r in result[:10]:
-                lines.append(f"  • {r.get('fecha', '?')} | **#{r.get('numero')}** | {_truncate(r.get('resuelve', ''), 80)}")
-            if len(result) > 10:
-                lines.append(f"\n... y {len(result) - 10} más.")
-            return "\n".join(lines)
-
-        elif intent in ("concept_query", "article_by_concept"):
-            concept = params.get("concept", "")
-            lines = [f"📚 **Artículos relacionados con '{concept}'** ({len(result)} encontrados)\n"]
-            for r in result[:10]:
-                lines.append(f"  • **Art. {r.get('articulo')}**: {_truncate(r.get('texto', ''), 120)}")
-            return "\n".join(lines)
+            return self._fmt_document_timeline(params, result)
 
         elif intent == "document_search":
-            lines = [f"📖 **Acuerdo Superior {params.get('doc_num', '')}**\n"]
-            for r in result:
-                lines.append(f"  • Fecha: {r.get('fecha', '?')}")
-                lines.append(f"  • Autoridad: {r.get('autoridad', '?')}")
-                lines.append(f"  • Resuelve: {r.get('resuelve', '?')}")
-            return "\n".join(lines)
+            return self._fmt_document_search(params, result)
 
         elif intent == "help":
             return result[0].get("help_text", "")
 
         else:
-            lines = [f"Resultados ({len(result)} encontrados):"]
+            lines = [f"**Resultados** ({len(result)} encontrados):"]
             for r in result[:5]:
                 lines.append(str(r))
             return "\n".join(lines)
+
+    def _fmt_article_text(self, params: dict, result: list) -> str:
+        lines = [f"**Respuesta rápida:**"]
+        for r in result:
+            texto = r.get("texto", "") or r.get("texto_completo", "")
+            lines.append(texto[:300])
+            doc = r.get("documento", "")
+            if doc:
+                lines.append(f"\n_Fuente: {doc}_")
+            if r.get("modificaciones", 0) > 0:
+                lines.append(f"_Modificado en {r['modificaciones']} ocasiones_")
+        return "\n".join(lines)
+
+    def _fmt_evolution(self, params: dict, result: list) -> str:
+        art = params.get("art_num", "")
+        lines = [f"**Evolución del Artículo {art}**\n"]
+        mods = [r for r in result if "modificado_por" in r]
+        current = [r for r in result if "texto_actual" in r]
+
+        if mods:
+            lines.append(f"**Modificaciones ({len(mods)}):**")
+            for m in mods:
+                lines.append(f"  • {m.get('anio', '?')}: **{m.get('modificado_por', '?')}**"
+                             f"\n    → {_truncate(m.get('accion', ''), 120)}")
+
+        if current:
+            lines.append(f"\n**Texto vigente:**")
+            lines.append(f"{_truncate(current[0].get('texto_actual', ''), 300)}")
+
+        return "\n".join(lines)
+
+    def _fmt_modified_by(self, params: dict, result: list) -> str:
+        art = params.get("art_num", "")
+        lines = [f"**Documentos que modifican el Artículo {art}**\n"]
+        for r in result:
+            if "modificado_por" in r:
+                lines.append(f"  • {r.get('anio', '?')}: **{r.get('modificado_por', '?')}**")
+                if r.get("accion"):
+                    lines[-1] += f"\n    → {_truncate(r['accion'], 100)}"
+        return "\n".join(lines)
+
+    def _fmt_keyword_search(self, keyword: str, result: list) -> str:
+        lines = [f"**Respuesta rápida:**"]
+        lines.append(f"Se encontraron {len(result)} artículos relacionados con \"{keyword}\".")
+        lines.append("")
+
+        lines.append(f"**Fuentes consultadas:**\n")
+        for r in result[:5]:
+            header = _fmt_article_header(r, keyword)
+            body = _fmt_article_body(r, keyword)
+            doc = r.get("documento_label") or r.get("documento", "")
+            asunto = r.get("documento_asunto", "")
+            doc_info = f" — {asunto}" if asunto else ""
+            lines.append(f"📄 **Art. {r.get('articulo')}**{doc_info}")
+            lines.append(f"   {body}")
+            lines.append("")
+
+        if len(result) > 5:
+            remaining = [r.get("articulo") for r in result[5:10]]
+            lines.append(f"... y {len(result) - 5} artículos más (Art. {', '.join(remaining)}{', ...' if len(result) > 10 else ''})")
+
+        lines.append("")
+        lines.append(f"**Donde se menciona \"{keyword}\":**")
+        for r in result[:8]:
+            texto = r.get("texto_completo") or r.get("texto", "")
+            excerpt = _find_sentence(texto, keyword)
+            lines.append(f"  • **Art. {r.get('articulo')}**: “{excerpt}”")
+
+        return "\n".join(lines)
+
+    def _fmt_document_timeline(self, params: dict, result: list) -> str:
+        lines = [f"**Documentos encontrados** ({len(result)})\n"]
+        for r in result[:10]:
+            lines.append(f"  • {r.get('fecha', '?')} | **#{r.get('numero')}** | {_truncate(r.get('resuelve', ''), 80)}")
+        if len(result) > 10:
+            lines.append(f"\n... y {len(result) - 10} más.")
+        return "\n".join(lines)
+
+    def _fmt_document_search(self, params: dict, result: list) -> str:
+        lines = [f"**Acuerdo Superior {params.get('doc_num', '')}**\n"]
+        for r in result:
+            lines.append(f"  • Fecha: {r.get('fecha', '?')}")
+            lines.append(f"  • Autoridad: {r.get('autoridad', '?')}")
+            lines.append(f"  • Resuelve: {r.get('resuelve', '?')}")
+        return "\n".join(lines)
 
 
 # ── Interactive CLI ──────────────────────────────────────────────

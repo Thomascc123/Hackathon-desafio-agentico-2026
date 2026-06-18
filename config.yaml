@@ -1,0 +1,24 @@
+model:
+  provider: ollama
+  name: qwen:latest
+  base_url: http://localhost:11434/v1
+  api_key: null
+
+embedding:
+  provider: local
+  model: all-MiniLM-L6-v2
+  device: cpu
+
+chroma:
+  persist_dir: ./storage/chromadb
+
+security:
+  rate_limit: 30
+  max_query_length: 500
+  audit_db: ./storage/audit.db
+
+graph:
+  json_path: ./graphrag_output/knowledge_graph.json
+
+directories:
+  pdf_dir: /tmp/normativa_pdfs

@@ -250,18 +250,50 @@ class NormativaGraph:
         return docs
 
     def query_articles_by_keyword(self, keyword: str) -> list[dict]:
-        """Find articles containing a keyword in their text."""
+        """Find articles containing a keyword in their text.
+        Splits the query into individual meaningful words and matches any of them."""
         results = []
-        kw = keyword.lower()
+        # Normalize: lowercase + remove accents
+        import unicodedata
+        def _normalize(t: str) -> str:
+            t = t.lower()
+            return ''.join(
+                c for c in unicodedata.normalize('NFKD', t)
+                if not unicodedata.combining(c)
+            )
+
+        # Extract meaningful words (3+ chars, skip stopwords)
+        stopwords = {'los', 'las', 'del', 'para', 'con', 'por', 'que', 'una',
+                     'puede', 'como', 'mas', 'son', 'sus', 'debe', 'sobre',
+                     'entre', 'durante', 'cada', "qué", 'tiene', 'esta'}
+        words = [
+            w for w in _normalize(keyword).split()
+            if len(w) >= 3 and w not in stopwords and w.isalpha()
+        ]
+        if not words:
+            words = [_normalize(keyword)]
+
         for nid, data in self.graph.nodes(data=True):
             if data.get("type") == NodeType.ARTICULO:
-                texto = (data.get("texto", "") + " " +
-                         data.get("texto_completo", "")).lower()
-                if kw in texto:
+                raw_text = data.get("texto", "") + " " + data.get("texto_completo", "")
+                texto = _normalize(raw_text)
+                if any(w in texto for w in words):
+                    doc_label = ""
+                    doc_asunto = ""
+                    doc_codigo = data.get("documento_codigo", "")
+                    if doc_codigo:
+                        doc_nid = self._node_id("DOC", doc_codigo)
+                        if self.graph.has_node(doc_nid):
+                            doc_label = self.graph.nodes[doc_nid].get("label", doc_codigo)
+                            doc_asunto = self.graph.nodes[doc_nid].get("asunto", "")
                     results.append({
                         "articulo": data.get("numero"),
-                        "texto": data.get("texto", "")[:200],
-                        "documento": data.get("documento_codigo", ""),
+                        "texto": data.get("texto", "")[:300],
+                        "texto_completo": data.get("texto_completo", ""),
+                        "documento_codigo": doc_codigo,
+                        "documento": doc_asunto or doc_label,
+                        "documento_label": doc_label,
+                        "documento_asunto": doc_asunto,
                         "modificaciones": data.get("num_modificaciones", 0),
                     })
         return results
